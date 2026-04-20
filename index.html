@@ -746,6 +746,63 @@ function speak(text, lang = "en-US") {
   window.speechSynthesis.speak(u);
 }
 
+// Build translation dictionary from all module data
+function buildDictionary() {
+  const esEn = {};
+  const enEs = {};
+  MODULES_DATA.forEach(mod => {
+    mod.lessons.forEach(lesson => {
+      lesson.vocabulary.forEach(v => {
+        const enLow = v.en.toLowerCase().trim();
+        const esLow = v.es.toLowerCase().split("/")[0].trim();
+        esEn[esLow] = v.en;
+        enEs[enLow] = v.es;
+      });
+      lesson.expressions.forEach(expr => {
+        esEn[expr.es.toLowerCase().trim()] = expr.en;
+        enEs[expr.en.toLowerCase().trim()] = expr.es;
+      });
+    });
+  });
+  return { esEn, enEs };
+}
+
+function translateText(text, direction) {
+  const dict = buildDictionary();
+  const input = text.toLowerCase().trim();
+  if (direction === "es-en") {
+    if (dict.esEn[input]) return dict.esEn[input];
+    // Try partial word matching
+    const words = input.split(/\s+/);
+    const translated = words.map(w => dict.esEn[w] || w);
+    const hasTranslation = translated.some((t, i) => t !== words[i]);
+    if (hasTranslation) return translated.join(" ");
+    return null;
+  } else {
+    if (dict.enEs[input]) return dict.enEs[input];
+    const words = input.split(/\s+/);
+    const translated = words.map(w => dict.enEs[w] || w);
+    const hasTranslation = translated.some((t, i) => t !== words[i]);
+    if (hasTranslation) return translated.join(" ");
+    return null;
+  }
+}
+
+function comparePronunciation(spoken, target) {
+  const normalize = s => s.toLowerCase().replace(/[^a-záéíóúñü\s]/g, "").trim().split(/\s+/);
+  const spokenWords = normalize(spoken);
+  const targetWords = normalize(target);
+  let matches = 0;
+  const wordResults = targetWords.map((tw, i) => {
+    const sw = spokenWords[i] || "";
+    const isMatch = sw === tw || (tw.length > 3 && sw.length > 3 && (tw.includes(sw) || sw.includes(tw)));
+    if (isMatch) matches++;
+    return { target: tw, spoken: sw, correct: isMatch };
+  });
+  const score = targetWords.length > 0 ? Math.round((matches / targetWords.length) * 100) : 0;
+  return { score, wordResults, matches, total: targetWords.length };
+}
+
 // ============================================================
 // STORAGE HELPERS
 // ============================================================
@@ -807,6 +864,14 @@ function App() {
   const [reviewMode, setReviewMode] = useState(false);
   const [onboardingName, setOnboardingName] = useState("");
   const [onboardingRole, setOnboardingRole] = useState("");
+  const [translatorText, setTranslatorText] = useState("");
+  const [translatorResult, setTranslatorResult] = useState("");
+  const [translatorDir, setTranslatorDir] = useState("es-en");
+  const [isRecording, setIsRecording] = useState(false);
+  const [spokenText, setSpokenText] = useState("");
+  const [pronFeedback, setPronFeedback] = useState(null);
+  const [pronTarget, setPronTarget] = useState("");
+  const recognitionRef = useRef(null);
 
   // Persist state
   useEffect(() => { saveState(user); }, [user]);
@@ -1106,6 +1171,32 @@ function App() {
               <div>
                 <div style={{ fontWeight: 700, fontSize: 15, color: colors.warning }}>Repasar errores</div>
                 <div style={{ fontSize: 13, color: colors.textMuted }}>{user.wrongAnswers.length} palabras/frases por repasar</div>
+              </div>
+            </button>
+          )}
+
+          {/* Translator tool */}
+          <button
+            onClick={() => { setTranslatorText(""); setTranslatorResult(""); setSpokenText(""); setPronFeedback(null); setPronTarget(""); setScreen("translator"); }}
+            style={{ ...cardStyle, display: "flex", alignItems: "center", gap: 12, cursor: "pointer", width: "100%", textAlign: "left", border: `1px solid ${colors.accent}30`, marginBottom: 12 }}
+          >
+            <span style={{ fontSize: 28 }}>🌐</span>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15, color: colors.accent }}>Traductor + Pronunciación</div>
+              <div style={{ fontSize: 13, color: colors.textMuted }}>Traduce textos, escucha y practica tu pronunciación</div>
+            </div>
+          </button>
+
+          {/* Completed lessons for review */}
+          {user.completedLessons.length > 0 && (
+            <button
+              onClick={() => setScreen("completed_lessons")}
+              style={{ ...cardStyle, display: "flex", alignItems: "center", gap: 12, cursor: "pointer", width: "100%", textAlign: "left", border: `1px solid #A78BFA30`, marginBottom: 24 }}
+            >
+              <span style={{ fontSize: 28 }}>📚</span>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 15, color: "#A78BFA" }}>Repasar lecciones</div>
+                <div style={{ fontSize: 13, color: colors.textMuted }}>{user.completedLessons.length} lecciones completadas disponibles</div>
               </div>
             </button>
           )}
@@ -1743,6 +1834,287 @@ function App() {
           }} style={{ ...btn(colors.danger), marginTop: 20 }}>
             Resetear progreso
           </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ============================================================
+  // SCREEN: TRANSLATOR + PRONUNCIATION
+  // ============================================================
+  if (screen === "translator") {
+    const startRecording = (targetText) => {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        setPronFeedback({ error: "Tu navegador no soporta reconocimiento de voz. Usa Chrome." });
+        return;
+      }
+      const recognition = new SpeechRecognition();
+      recognition.lang = "en-US";
+      recognition.continuous = false;
+      recognition.interimResults = false;
+      recognition.maxAlternatives = 1;
+      
+      recognition.onstart = () => {
+        setIsRecording(true);
+        setSpokenText("");
+        setPronFeedback(null);
+        setPronTarget(targetText);
+      };
+      
+      recognition.onresult = (event) => {
+        const transcript = event.results[0][0].transcript;
+        setSpokenText(transcript);
+        const result = comparePronunciation(transcript, targetText);
+        setPronFeedback(result);
+      };
+      
+      recognition.onerror = (event) => {
+        setIsRecording(false);
+        if (event.error === "no-speech") {
+          setPronFeedback({ error: "No se detectó voz. Inténtalo de nuevo." });
+        } else {
+          setPronFeedback({ error: "Error: " + event.error });
+        }
+      };
+      
+      recognition.onend = () => {
+        setIsRecording(false);
+      };
+      
+      recognitionRef.current = recognition;
+      recognition.start();
+    };
+
+    const stopRecording = () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+    };
+
+    const handleTranslate = () => {
+      if (!translatorText.trim()) return;
+      const result = translateText(translatorText, translatorDir);
+      if (result) {
+        setTranslatorResult(result);
+      } else {
+        setTranslatorResult("⚠️ No encontrado en el vocabulario de la app. Prueba con palabras o frases de las lecciones.");
+      }
+    };
+
+    return (
+      <div style={baseStyle}>
+        <div style={headerStyle}>
+          <button onClick={() => setScreen("dashboard")} style={{ background: "none", border: "none", color: colors.text, cursor: "pointer", fontSize: 20, padding: 4 }}>←</button>
+          <span style={{ fontSize: 20 }}>🌐</span>
+          <span style={{ fontWeight: 700, fontSize: 17 }}>Traductor + Pronunciación</span>
+        </div>
+        <div style={{ padding: 20 }}>
+          {/* Direction toggle */}
+          <div style={{ display: "flex", gap: 0, marginBottom: 20, borderRadius: 12, overflow: "hidden", border: `1px solid ${colors.border}` }}>
+            <button
+              onClick={() => { setTranslatorDir("es-en"); setTranslatorResult(""); }}
+              style={{ flex: 1, padding: "12px 8px", background: translatorDir === "es-en" ? colors.accent : colors.card, color: translatorDir === "es-en" ? colors.bg : colors.textMuted, border: "none", fontFamily: "inherit", fontWeight: 700, fontSize: 14, cursor: "pointer" }}
+            >
+              ES → EN
+            </button>
+            <button
+              onClick={() => { setTranslatorDir("en-es"); setTranslatorResult(""); }}
+              style={{ flex: 1, padding: "12px 8px", background: translatorDir === "en-es" ? colors.accent : colors.card, color: translatorDir === "en-es" ? colors.bg : colors.textMuted, border: "none", fontFamily: "inherit", fontWeight: 700, fontSize: 14, cursor: "pointer" }}
+            >
+              EN → ES
+            </button>
+          </div>
+
+          {/* Text input */}
+          <div style={cardStyle}>
+            <label style={{ fontSize: 12, fontWeight: 600, color: colors.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", display: "block", marginBottom: 8 }}>
+              {translatorDir === "es-en" ? "Escribe en español" : "Escribe en inglés"}
+            </label>
+            <textarea
+              value={translatorText}
+              onChange={e => setTranslatorText(e.target.value)}
+              placeholder={translatorDir === "es-en" ? "Ej: rendimiento, arrancar la línea..." : "Ej: yield, start the production line..."}
+              rows={3}
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 10, border: `1px solid ${colors.border}`, background: colors.bg, color: colors.text, fontSize: 16, fontFamily: "inherit", outline: "none", resize: "none", boxSizing: "border-box" }}
+            />
+            <button onClick={handleTranslate} disabled={!translatorText.trim()} style={{ ...btn(), marginTop: 12, opacity: translatorText.trim() ? 1 : 0.4 }}>
+              Traducir
+            </button>
+          </div>
+
+          {/* Translation result */}
+          {translatorResult && (
+            <div style={{ ...cardStyle, border: translatorResult.startsWith("⚠️") ? `1px solid ${colors.warning}40` : `1px solid ${colors.accent}40` }}>
+              <label style={{ fontSize: 12, fontWeight: 600, color: colors.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", display: "block", marginBottom: 8 }}>Traducción</label>
+              <div style={{ fontSize: 20, fontWeight: 700, color: translatorResult.startsWith("⚠️") ? colors.warning : colors.accent, marginBottom: 12, lineHeight: 1.4 }}>
+                {translatorResult}
+              </div>
+              
+              {!translatorResult.startsWith("⚠️") && (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button
+                    onClick={() => speak(translatorResult, translatorDir === "es-en" ? "en-US" : "es-ES")}
+                    style={{ ...btn(colors.card, false), display: "flex", alignItems: "center", gap: 6, fontSize: 14, padding: "10px 16px" }}
+                  >
+                    🔊 Escuchar
+                  </button>
+                  
+                  {translatorDir === "es-en" && (
+                    <button
+                      onClick={() => isRecording ? stopRecording() : startRecording(translatorResult)}
+                      style={{ ...btn(isRecording ? colors.danger : "#7B2D8E", false), display: "flex", alignItems: "center", gap: 6, fontSize: 14, padding: "10px 16px", color: "#fff" }}
+                    >
+                      {isRecording ? "⏹ Parar" : "🎤 Practicar voz"}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Pronunciation feedback */}
+          {pronFeedback && !pronFeedback.error && (
+            <div style={{ ...cardStyle, border: `1px solid ${pronFeedback.score >= 70 ? colors.correct : pronFeedback.score >= 40 ? colors.warning : colors.danger}40` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                <span style={{ fontSize: 13, fontWeight: 700, color: colors.textMuted, textTransform: "uppercase", letterSpacing: "0.05em" }}>Tu pronunciación</span>
+                <span style={{ fontSize: 24, fontWeight: 800, color: pronFeedback.score >= 70 ? colors.correct : pronFeedback.score >= 40 ? colors.warning : colors.danger }}>
+                  {pronFeedback.score}%
+                </span>
+              </div>
+              
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 12, color: colors.textMuted, marginBottom: 4 }}>Dijiste:</div>
+                <div style={{ fontSize: 16, fontWeight: 600, color: colors.text, fontStyle: "italic" }}>"{spokenText}"</div>
+              </div>
+              
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 12, color: colors.textMuted, marginBottom: 4 }}>Objetivo:</div>
+                <div style={{ fontSize: 16, fontWeight: 600, color: colors.accent }}>"{pronTarget}"</div>
+              </div>
+
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+                {pronFeedback.wordResults.map((wr, i) => (
+                  <span key={i} style={{
+                    padding: "4px 10px", borderRadius: 6, fontSize: 14, fontWeight: 600,
+                    background: wr.correct ? `${colors.correct}20` : `${colors.danger}20`,
+                    color: wr.correct ? colors.correct : colors.danger,
+                  }}>
+                    {wr.target}
+                  </span>
+                ))}
+              </div>
+
+              <div style={{ fontSize: 13, color: colors.textMuted, marginBottom: 12 }}>
+                {pronFeedback.score >= 90 ? "🌟 ¡Excelente pronunciación!" :
+                 pronFeedback.score >= 70 ? "👍 ¡Bien! Unas pocas palabras por mejorar." :
+                 pronFeedback.score >= 40 ? "💪 Sigue practicando. Escucha el audio y repite." :
+                 "🔄 Inténtalo de nuevo. Escucha primero con 🔊 y luego repite."}
+              </div>
+
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => speak(pronTarget, "en-US")} style={{ ...btn(colors.card, false), fontSize: 13, padding: "8px 14px" }}>
+                  🔊 Escuchar
+                </button>
+                <button onClick={() => startRecording(pronTarget)} style={{ ...btn("#7B2D8E", false), fontSize: 13, padding: "8px 14px", color: "#fff" }}>
+                  🎤 Repetir
+                </button>
+              </div>
+            </div>
+          )}
+
+          {pronFeedback && pronFeedback.error && (
+            <div style={{ ...cardStyle, border: `1px solid ${colors.danger}40` }}>
+              <div style={{ fontSize: 14, color: colors.danger }}>{pronFeedback.error}</div>
+            </div>
+          )}
+
+          {isRecording && (
+            <div style={{ textAlign: "center", padding: 20 }}>
+              <div style={{ fontSize: 48, animation: "pulse 1.5s infinite" }}>🎤</div>
+              <div style={{ color: colors.accent, fontWeight: 600, marginTop: 8 }}>Escuchando... Habla ahora</div>
+              <style>{`@keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.6; transform: scale(1.1); } }`}</style>
+            </div>
+          )}
+
+          {/* Quick practice */}
+          <div style={{ ...cardStyle, marginTop: 16 }}>
+            <h4 style={{ fontSize: 13, fontWeight: 700, color: colors.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 12 }}>Práctica rápida de pronunciación</h4>
+            <p style={{ fontSize: 13, color: colors.textMuted, marginBottom: 12 }}>Pulsa 🔊 para escuchar, luego 🎤 para grabarte</p>
+            <div style={{ display: "grid", gap: 8 }}>
+              {[
+                "Start the production line",
+                "Check the temperature settings",
+                "I'll send you a quote shortly",
+                "The shipment is scheduled for Monday",
+                "Thank you for your inquiry",
+                "We have organic certification",
+                "Customs clearance is in progress",
+                "Looking forward to working with you"
+              ].map((phrase, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderRadius: 10, background: colors.bg, border: `1px solid ${colors.border}` }}>
+                  <span style={{ flex: 1, fontSize: 14, fontWeight: 500 }}>{phrase}</span>
+                  <button onClick={() => speak(phrase)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 16, padding: 4, flexShrink: 0 }}>🔊</button>
+                  <button onClick={() => startRecording(phrase)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 16, padding: 4, flexShrink: 0 }}>🎤</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ============================================================
+  // SCREEN: COMPLETED LESSONS (review)
+  // ============================================================
+  if (screen === "completed_lessons") {
+    const completedLessonsList = [];
+    MODULES_DATA.forEach(mod => {
+      mod.lessons.forEach(lesson => {
+        if (user.completedLessons.includes(lesson.id)) {
+          completedLessonsList.push({ module: mod, lesson });
+        }
+      });
+    });
+
+    return (
+      <div style={baseStyle}>
+        <div style={headerStyle}>
+          <button onClick={() => setScreen("dashboard")} style={{ background: "none", border: "none", color: colors.text, cursor: "pointer", fontSize: 20, padding: 4 }}>←</button>
+          <span style={{ fontSize: 20 }}>📚</span>
+          <span style={{ fontWeight: 700, fontSize: 17 }}>Repasar lecciones</span>
+        </div>
+        <div style={{ padding: 20 }}>
+          <p style={{ fontSize: 14, color: colors.textMuted, marginBottom: 20 }}>
+            Vuelve a cualquier lección completada para repasar vocabulario, expresiones y ejercicios.
+          </p>
+          <div style={{ display: "grid", gap: 10 }}>
+            {completedLessonsList.map(({ module: mod, lesson }) => (
+              <button
+                key={lesson.id}
+                onClick={() => {
+                  setCurrentModule(mod);
+                  setCurrentLesson(lesson);
+                  setLessonTab("vocab");
+                  setScreen("lesson");
+                }}
+                style={{ ...cardStyle, display: "flex", alignItems: "center", gap: 14, cursor: "pointer", width: "100%", textAlign: "left", marginBottom: 0 }}
+              >
+                <div style={{ width: 44, height: 44, borderRadius: 12, background: `${mod.color}20`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flexShrink: 0 }}>
+                  {mod.icon}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 700, fontSize: 15 }}>{lesson.name}</div>
+                  <div style={{ fontSize: 12, color: colors.textMuted, marginTop: 2 }}>{mod.name} · {lesson.vocabulary.length} palabras · {lesson.exercises.length} ejercicios</div>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+                  <span style={{ fontSize: 16, color: colors.correct }}>✓</span>
+                  <span style={{ fontSize: 11, color: colors.textMuted }}>Repasar</span>
+                </div>
+              </button>
+            ))}
+          </div>
         </div>
       </div>
     );
