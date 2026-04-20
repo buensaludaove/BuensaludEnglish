@@ -1,7 +1,7 @@
 {
-  "name": "OliveEnglish",
-  "short_name": "OliveEnglish",
-  "description": "Inglés práctico para la almazara",
+  "name": "BuensaludEnglish",
+  "short_name": "BuensaludEng",
+  "description": "Inglés práctico para la almazara - Buensalud",
   "start_url": "./index.html",
   "display": "standalone",
   "background_color": "#0A0E17",
